@@ -138,7 +138,7 @@ def get_hand_name(cards):
     return HAND_NAMES.get(score[0], 'Unknown')
 
 
-def monte_carlo_equity(hole_cards, community_cards, num_opponents=1, num_simulations=10000):
+def monte_carlo_equity(hole_cards, community_cards, num_opponents=1, num_simulations=10000, seed=None):
     """
     Calculate equity using Monte Carlo simulation.
 
@@ -147,6 +147,7 @@ def monte_carlo_equity(hole_cards, community_cards, num_opponents=1, num_simulat
         community_cards: list of 0-5 card strings
         num_opponents: number of opponents (default 1)
         num_simulations: number of random simulations to run
+        seed: optional; same cards -> same result (stable display when refreshing)
 
     Returns:
         dict with:
@@ -162,6 +163,9 @@ def monte_carlo_equity(hole_cards, community_cards, num_opponents=1, num_simulat
             'equity': 0.0, 'win_pct': 0.0, 'tie_pct': 0.0,
             'lose_pct': 100.0, 'hand_name': 'No cards', 'simulations': 0
         }
+
+    if seed is not None:
+        random.seed(seed)
 
     known_cards = set(hole_cards + community_cards)
     remaining_deck = [c for c in FULL_DECK if c not in known_cards]

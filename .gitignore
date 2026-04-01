@@ -5,6 +5,7 @@ __pycache__/
 .env
 regions.json
 calibration_screenshot.png
+stake-odds/debug/
 stake-odds/venv/
 odds-calculator/
 *.egg-info/

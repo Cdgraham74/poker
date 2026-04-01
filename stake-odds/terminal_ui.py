@@ -13,7 +13,8 @@ from rich.live import Live
 from rich.columns import Columns
 from rich import box
 
-console = Console()
+# force_terminal: Cursor / some Windows hosts report non-TTY and hide Rich output
+console = Console(force_terminal=True, legacy_windows=False)
 
 SUIT_SYMBOLS = {'s': '\u2660', 'h': '\u2665', 'd': '\u2666', 'c': '\u2663'}
 SUIT_COLORS = {'s': 'white', 'h': 'red', 'd': 'cyan', 'c': 'green'}
@@ -68,12 +69,10 @@ def equity_bar(pct, width=30):
     return bar
 
 
-def build_display(hole_cards, community_cards, odds_result, bet_rec, num_opponents, pot=None, street='preflop', manual_mode=False):
+def build_display(hole_cards, community_cards, odds_result, bet_rec, num_opponents, pot=None, street='preflop'):
     """Build the full terminal display."""
 
-    # Title
-    mode_str = "MANUAL" if manual_mode else "AUTO-DETECT"
-    title = f"STAKE POKER ODDS  [{mode_str}]  |  Opponents: {num_opponents}"
+    title = f"STAKE POKER ODDS  [AUTO-DETECT]  |  Opponents: {num_opponents}"
 
     # Cards section
     cards_table = Table(show_header=False, box=None, padding=(0, 1))
@@ -201,20 +200,12 @@ def build_display(hole_cards, community_cards, odds_result, bet_rec, num_opponen
     output.add_row(odds_panel)
     output.add_row(bet_panel)
 
-    if manual_mode:
-        output.add_row(
-            Text(
-                "Commands: type cards like 'Ah Kd' | 'board Qh Jh 2c' | 'opp 3' | 'reset' | 'q' to quit",
-                style="dim"
-            )
+    output.add_row(
+        Text(
+            "Auto-scanning screen... Press Ctrl+C to stop",
+            style="dim"
         )
-    else:
-        output.add_row(
-            Text(
-                "Auto-scanning screen... Press Ctrl+C to stop  |  'opp N' to set opponents",
-                style="dim"
-            )
-        )
+    )
 
     return output
 
@@ -224,8 +215,8 @@ def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
 
-def print_display(hole_cards, community_cards, odds_result, bet_rec, num_opponents, pot=None, street='preflop', manual_mode=False):
+def print_display(hole_cards, community_cards, odds_result, bet_rec, num_opponents, pot=None, street='preflop'):
     """Print the full display to terminal."""
     clear_screen()
-    display = build_display(hole_cards, community_cards, odds_result, bet_rec, num_opponents, pot, street, manual_mode)
+    display = build_display(hole_cards, community_cards, odds_result, bet_rec, num_opponents, pot, street)
     console.print(display)
