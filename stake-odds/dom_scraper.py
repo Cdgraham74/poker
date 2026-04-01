@@ -85,6 +85,8 @@ if(gm&&gm.prevGameState){
 var cm=fs('chipsModel');r.pot=cm?(cm.pot||0):0;
 var dsm=fs('deskScreenModel');r.combination=dsm?(dsm.highCombination||''):'';
 var clm=fs('clientModel');r.playerId=clm?clm.playerId:0;
+var tam=fs('tableActionsModel');
+if(tam&&tam.actions){r.actions=tam.actions;}else{r.actions=[];}
 return JSON.stringify(r);
 })()"""
 
@@ -227,6 +229,7 @@ class StakePokerScraper:
             "combination": "",
             "num_opponents": 1,
             "game_id": 0,
+            "actions": [],
         }
         if not data:
             return empty
@@ -259,6 +262,7 @@ class StakePokerScraper:
             if s.get("id") != pid and s.get("cards") not in ("", None)
         )
         out["num_opponents"] = max(active, 1)
+        out["actions"] = data.get("actions", [])
 
         return out
 

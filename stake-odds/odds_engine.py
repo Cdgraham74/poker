@@ -242,19 +242,93 @@ def _preflop_hand_name(hole_cards):
     return f"{high_char}{low_char}{suited}"
 
 
-def get_bet_recommendation(equity, street='preflop'):
+def parse_actions(raw_actions):
     """
-    Get bet sizing recommendation based on equity.
+    Parse Stake.us tableActionsModel.actions into usable info.
+
+    Known action types:  1=fold, 2=check, 3=call, 9=raise/bet, 15=check(alt)
+    Returns dict with can_check, can_call, call_amount, min_raise, is_allin_raise.
+    """
+    can_check = False
+    can_call = False
+    call_amount = 0.0
+    min_raise = 0.0
+    is_allin_raise = False
+
+    for a in (raw_actions or []):
+        t = a.get("type", 0)
+        cash = a.get("cash", 0) or 0
+        if t in (2, 15):
+            can_check = True
+        elif t == 3:
+            can_call = True
+            call_amount = float(cash)
+        elif t == 9:
+            min_raise = float(cash)
+            is_allin_raise = bool(a.get("isAllIn", False))
+
+    return {
+        "can_check": can_check,
+        "can_call": can_call,
+        "call_amount": call_amount,
+        "min_raise": min_raise,
+        "is_allin_raise": is_allin_raise,
+    }
+
+
+def get_bet_recommendation(equity, street='preflop', pot=0.0, actions=None):
+    """
+    Context-aware bet recommendation using equity, pot odds, and available actions.
 
     Args:
         equity: float 0.0-1.0
         street: 'preflop', 'flop', 'turn', 'river'
+        pot: current pot size
+        actions: raw actions list from tableActionsModel (optional)
 
     Returns:
         dict with 'action', 'confidence', 'sizing' keys
     """
     pct = equity * 100
+    act = parse_actions(actions)
+    can_check = act["can_check"]
+    call_amt = act["call_amount"]
+    facing_bet = act["can_call"] and call_amt > 0
 
+    # Pot odds: what equity do we need to justify calling?
+    pot_odds = 0.0
+    if facing_bet and pot > 0:
+        pot_odds = call_amt / (pot + call_amt)
+
+    # --- FACING A BET (must call, raise, or fold) ---
+    if facing_bet:
+        if pct >= 80:
+            return {'action': 'RAISE / ALL-IN', 'confidence': 'monster', 'sizing': 'all-in'}
+        elif pct >= 65:
+            return {'action': 'RAISE', 'confidence': 'very strong', 'sizing': '75%'}
+        elif equity > pot_odds * 1.5:
+            return {'action': 'RAISE', 'confidence': 'strong', 'sizing': '50%'}
+        elif equity > pot_odds:
+            return {'action': 'CALL', 'confidence': 'good', 'sizing': 'check'}
+        elif equity > pot_odds * 0.7:
+            return {'action': 'CALL (borderline)', 'confidence': 'marginal', 'sizing': 'check'}
+        else:
+            return {'action': 'FOLD', 'confidence': 'weak', 'sizing': 'fold'}
+
+    # --- NOT FACING A BET (can check or bet) ---
+    if can_check:
+        if pct >= 80:
+            return {'action': 'BET ALL-IN', 'confidence': 'monster', 'sizing': 'all-in'}
+        elif pct >= 70:
+            return {'action': 'BET 75% POT', 'confidence': 'very strong', 'sizing': '75%'}
+        elif pct >= 60:
+            return {'action': 'BET 50% POT', 'confidence': 'strong', 'sizing': '50%'}
+        elif pct >= 50:
+            return {'action': 'BET 25% POT', 'confidence': 'good', 'sizing': '25%'}
+        else:
+            return {'action': 'CHECK', 'confidence': 'marginal', 'sizing': 'check'}
+
+    # --- PREFLOP / NO ACTION DATA ---
     if street == 'preflop':
         if pct >= 75:
             return {'action': 'RAISE / ALL-IN', 'confidence': 'very strong', 'sizing': 'all-in'}
@@ -262,26 +336,24 @@ def get_bet_recommendation(equity, street='preflop'):
             return {'action': 'RAISE 75% POT', 'confidence': 'strong', 'sizing': '75%'}
         elif pct >= 50:
             return {'action': 'RAISE 50% POT', 'confidence': 'good', 'sizing': '50%'}
-        elif pct >= 40:
+        elif pct >= 35:
             return {'action': 'CALL / CHECK', 'confidence': 'marginal', 'sizing': 'check'}
         else:
             return {'action': 'FOLD', 'confidence': 'weak', 'sizing': 'fold'}
+
+    # Post-flop fallback (no action data)
+    if pct >= 80:
+        return {'action': 'ALL-IN', 'confidence': 'monster', 'sizing': 'all-in'}
+    elif pct >= 70:
+        return {'action': 'BET 75% POT', 'confidence': 'very strong', 'sizing': '75%'}
+    elif pct >= 60:
+        return {'action': 'BET 50% POT', 'confidence': 'strong', 'sizing': '50%'}
+    elif pct >= 50:
+        return {'action': 'BET 25% POT', 'confidence': 'good', 'sizing': '25%'}
+    elif pct >= 35:
+        return {'action': 'CHECK / CALL', 'confidence': 'marginal', 'sizing': 'check'}
     else:
-        # Post-flop recommendations
-        if pct >= 80:
-            return {'action': 'ALL-IN', 'confidence': 'monster', 'sizing': 'all-in'}
-        elif pct >= 70:
-            return {'action': 'BET 75% POT', 'confidence': 'very strong', 'sizing': '75%'}
-        elif pct >= 60:
-            return {'action': 'BET 50% POT', 'confidence': 'strong', 'sizing': '50%'}
-        elif pct >= 50:
-            return {'action': 'BET 25% POT', 'confidence': 'good', 'sizing': '25%'}
-        elif pct >= 40:
-            return {'action': 'CHECK / CALL', 'confidence': 'marginal', 'sizing': 'check'}
-        elif pct >= 25:
-            return {'action': 'CHECK / FOLD', 'confidence': 'weak', 'sizing': 'check'}
-        else:
-            return {'action': 'FOLD', 'confidence': 'very weak', 'sizing': 'fold'}
+        return {'action': 'CHECK / FOLD', 'confidence': 'weak', 'sizing': 'check'}
 
 
 def validate_card(card_str):

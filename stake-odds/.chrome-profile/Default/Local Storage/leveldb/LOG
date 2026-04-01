@@ -1,8 +1,0 @@
-2026/04/01-14:48:24.889 3bd8 Creating DB C:\Users\cdgra\OneDrive\Desktop\poker\stake-odds\.chrome-profile\Default\Local Storage\leveldb since it was missing.
-2026/04/01-14:48:24.913 3bd8 Reusing MANIFEST C:\Users\cdgra\OneDrive\Desktop\poker\stake-odds\.chrome-profile\Default\Local Storage\leveldb/MANIFEST-000001
-2026/04/01-14:50:37.239 334c Level-0 table #5: started
-2026/04/01-14:50:37.245 334c Level-0 table #5: 41137 bytes OK
-2026/04/01-14:50:37.249 334c Delete type=0 #3
-2026/04/01-14:51:40.682 334c Level-0 table #7: started
-2026/04/01-14:51:40.687 334c Level-0 table #7: 38177 bytes OK
-2026/04/01-14:51:40.690 334c Delete type=0 #4

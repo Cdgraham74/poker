@@ -189,6 +189,7 @@ def run():
             pot = detected["pot"]
             num_opponents = detected.get("num_opponents", 1)
             game_id = detected.get("game_id", 0)
+            raw_actions = detected.get("actions", [])
 
             if game_id and game_id != prev_game_id and prev_game_id != 0:
                 prev_hole = []
@@ -205,16 +206,54 @@ def run():
                     hole_cards,
                     community_cards,
                     num_opponents=num_opponents,
-                    num_simulations=5000,
+                    num_simulations=3000,
                     seed=_equity_seed(hole_cards, community_cards),
                 )
-                rec = get_bet_recommendation(odds["equity"], street)
+                rec = get_bet_recommendation(
+                    odds["equity"], street, pot=pot, actions=raw_actions,
+                )
                 print_display(
                     hole_cards, community_cards, odds, rec,
                     num_opponents, pot, street,
                 )
                 prev_hole = hole_cards[:]
                 prev_community = community_cards[:]
+
+                # Refine with more sims in background, redisplay
+                odds2 = monte_carlo_equity(
+                    hole_cards,
+                    community_cards,
+                    num_opponents=num_opponents,
+                    num_simulations=12000,
+                    seed=_equity_seed(hole_cards, community_cards) + 1,
+                )
+                merged_equity = (
+                    odds["equity"] * 3000 + odds2["equity"] * 12000
+                ) / 15000
+                merged_win = (
+                    odds["win_pct"] * 3000 + odds2["win_pct"] * 12000
+                ) / 15000
+                merged_tie = (
+                    odds["tie_pct"] * 3000 + odds2["tie_pct"] * 12000
+                ) / 15000
+                merged_lose = (
+                    odds["lose_pct"] * 3000 + odds2["lose_pct"] * 12000
+                ) / 15000
+                odds_final = {
+                    "equity": merged_equity,
+                    "win_pct": round(merged_win, 1),
+                    "tie_pct": round(merged_tie, 1),
+                    "lose_pct": round(merged_lose, 1),
+                    "hand_name": odds["hand_name"],
+                    "simulations": 15000,
+                }
+                rec2 = get_bet_recommendation(
+                    odds_final["equity"], street, pot=pot, actions=raw_actions,
+                )
+                print_display(
+                    hole_cards, community_cards, odds_final, rec2,
+                    num_opponents, pot, street,
+                )
 
             elif len(hole_cards) < 2:
                 if prev_hole:
@@ -229,7 +268,7 @@ def run():
                             "(play a hand or check that a table is open)[/]"
                         )
 
-            time.sleep(0.3)
+            time.sleep(0.05)
 
         except KeyboardInterrupt:
             break
