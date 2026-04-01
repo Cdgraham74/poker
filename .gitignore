@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+regions.json
+calibration_screenshot.png
+stake-odds/venv/
+odds-calculator/
+*.egg-info/
+dist/
+build/
+.claude/
