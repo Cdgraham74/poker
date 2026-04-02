@@ -23,6 +23,7 @@ import json
 from odds_engine import monte_carlo_equity, get_bet_recommendation, parse_actions
 from preflop_advisor import preflop_advice, get_position
 from session_tracker import SessionTracker
+from opponent_tracker import OpponentTracker
 from terminal_ui import print_display, console
 
 
@@ -147,8 +148,41 @@ def _ensure_chrome_debug():
     return False
 
 
+def _get_primary_villain_stats(opponents, opp_stats, active_seat):
+    """Find the aggressor — the opponent with the biggest current bet.
+
+    Falls back to the most-seen player if nobody has bet.
+    This ensures range estimation reflects the actual bettor's tendencies.
+    """
+    if not opp_stats or not opponents:
+        return None
+
+    active_opps = [o for o in opponents if o.get("active") and o.get("name")]
+
+    best_name = None
+    best_bet = 0
+    for o in active_opps:
+        bet = o.get("bet", 0)
+        name = o.get("name", "")
+        if bet > best_bet and name in opp_stats:
+            best_bet = bet
+            best_name = name
+
+    if not best_name:
+        best_hands = -1
+        for o in active_opps:
+            name = o.get("name", "")
+            stats = opp_stats.get(name)
+            if stats and stats.get("hands", 0) > best_hands:
+                best_hands = stats["hands"]
+                best_name = name
+
+    return opp_stats.get(best_name) if best_name else None
+
+
 def _compute_decision(hole_cards, community_cards, street, position_name,
-                      raw_actions, pot, big_blind, stack, num_opponents):
+                      raw_actions, pot, big_blind, stack, num_opponents,
+                      num_limpers=0, villain_stats=None):
     """
     Run the GTO decision engine (preflop advisor or postflop Monte Carlo).
 
@@ -157,7 +191,7 @@ def _compute_decision(hole_cards, community_cards, street, position_name,
     """
     if street == "preflop":
         act = parse_actions(raw_actions)
-        facing = act["can_call"] and act["call_amount"] > 0
+        facing = act["can_call"] and act["call_amount"] > big_blind * 1.5
         pf = preflop_advice(
             hole_cards,
             position_name or "UTG",
@@ -166,12 +200,13 @@ def _compute_decision(hole_cards, community_cards, street, position_name,
             pot=pot,
             big_blind=big_blind,
             stack=stack,
+            num_limpers=num_limpers,
         )
         effective_opp = min(num_opponents, 2)
         odds = monte_carlo_equity(
             hole_cards, community_cards,
             num_opponents=effective_opp,
-            num_simulations=15000,
+            num_simulations=8000,
             seed=_equity_seed(hole_cards, community_cards),
         )
         return odds, None, pf, effective_opp
@@ -179,7 +214,7 @@ def _compute_decision(hole_cards, community_cards, street, position_name,
     odds = monte_carlo_equity(
         hole_cards, community_cards,
         num_opponents=num_opponents,
-        num_simulations=3000,
+        num_simulations=10000,
         seed=_equity_seed(hole_cards, community_cards),
     )
     rec = get_bet_recommendation(
@@ -187,38 +222,10 @@ def _compute_decision(hole_cards, community_cards, street, position_name,
         stack=stack, big_blind=big_blind,
         hole_cards=hole_cards,
         community_cards=community_cards,
+        num_opponents=num_opponents,
+        villain_stats=villain_stats,
     )
     return odds, rec, None, num_opponents
-
-
-def _refine_postflop(hole_cards, community_cards, odds, num_opponents,
-                     street, raw_actions, pot, stack, big_blind):
-    """Run extra simulations and merge for a refined postflop result."""
-    odds2 = monte_carlo_equity(
-        hole_cards, community_cards,
-        num_opponents=num_opponents,
-        num_simulations=12000,
-        seed=_equity_seed(hole_cards, community_cards) + 1,
-    )
-    merged_equity = (odds["equity"] * 3000 + odds2["equity"] * 12000) / 15000
-    merged_win = (odds["win_pct"] * 3000 + odds2["win_pct"] * 12000) / 15000
-    merged_tie = (odds["tie_pct"] * 3000 + odds2["tie_pct"] * 12000) / 15000
-    merged_lose = (odds["lose_pct"] * 3000 + odds2["lose_pct"] * 12000) / 15000
-    odds_final = {
-        "equity": merged_equity,
-        "win_pct": round(merged_win, 1),
-        "tie_pct": round(merged_tie, 1),
-        "lose_pct": round(merged_lose, 1),
-        "hand_name": odds["hand_name"],
-        "simulations": 15000,
-    }
-    rec2 = get_bet_recommendation(
-        odds_final["equity"], street, pot=pot, actions=raw_actions,
-        stack=stack, big_blind=big_blind,
-        hole_cards=hole_cards,
-        community_cards=community_cards,
-    )
-    return odds_final, rec2
 
 
 def run(auto_mode=False):
@@ -255,9 +262,17 @@ def run(auto_mode=False):
     prev_community = []
     prev_game_id = 0
     prev_acted_key = ""
+    prev_display_key = ""
+    prev_action_key = ""
     last_hint = 0.0
     error_count = 0
     session = SessionTracker()
+    opp_tracker = OpponentTracker()
+    cached_odds = None
+    cached_rec = None
+    cached_pf = None
+    cached_position = None
+    cached_street = None
 
     running = True
 
@@ -279,14 +294,25 @@ def run(auto_mode=False):
             raw_actions = detected.get("actions", [])
             stack = detected.get("stack", 0.0)
             big_blind = detected.get("big_blind", 0.0)
+            opponents = detected.get("opponents", [])
+            num_limpers = detected.get("num_limpers", 0)
+            is_our_turn = detected.get("is_our_turn", False)
+            seat_state = detected.get("seat_state")
+            active_seat = detected.get("active_seat", -1)
 
             session.update(game_id, stack)
             session_stats = session.summary(big_blind)
+            opp_tracker.record_hand(game_id, opponents, big_blind, our_stack=stack)
+            opp_stats = opp_tracker.all_stats()
 
             if game_id and game_id != prev_game_id and prev_game_id != 0:
                 prev_hole = []
                 prev_community = []
                 prev_acted_key = ""
+                prev_action_key = ""
+                cached_odds = None
+                cached_rec = None
+                cached_pf = None
             prev_game_id = game_id
 
             cards_changed = (
@@ -295,78 +321,114 @@ def run(auto_mode=False):
 
             has_actions = len(raw_actions) > 0
 
-            if len(hole_cards) == 2 and (cards_changed or (auto_mode and has_actions)):
+            if len(hole_cards) == 2:
                 street = get_street(community_cards)
-                pos_data = detected.get("position")
 
-                position_name = None
-                if pos_data:
-                    position_name = get_position(
-                        pos_data["dealer_idx"],
-                        pos_data["our_seat_idx"],
-                        pos_data["occupied_seats"],
+                if cards_changed:
+                    pos_data = detected.get("position")
+                    position_name = None
+                    if pos_data:
+                        position_name = get_position(
+                            pos_data["dealer_idx"],
+                            pos_data["our_seat_idx"],
+                            pos_data["occupied_seats"],
+                        )
+                    cached_position = position_name
+                    cached_street = street
+                    prev_hole = hole_cards[:]
+                    prev_community = community_cards[:]
+
+                act = parse_actions(raw_actions)
+                action_key = f"{act['call_amount']:.2f}:{act['can_check']}:{act['min_raise']:.2f}:{pot:.2f}"
+                need_recompute = cards_changed or action_key != prev_action_key
+
+                if need_recompute:
+                    prev_action_key = action_key
+                    primary_villain = _get_primary_villain_stats(
+                        opponents, opp_stats, active_seat)
+
+                    odds, rec, pf, effective_opp = _compute_decision(
+                        hole_cards, community_cards, street,
+                        cached_position,
+                        raw_actions, pot, big_blind, stack, num_opponents,
+                        num_limpers=num_limpers,
+                        villain_stats=primary_villain,
                     )
+                    cached_odds = odds
+                    cached_rec = rec
+                    cached_pf = pf
 
-                odds, rec, pf, effective_opp = _compute_decision(
-                    hole_cards, community_cards, street, position_name,
-                    raw_actions, pot, big_blind, stack, num_opponents,
+                display_key = (
+                    f"{game_id}:{street}:{pot}:{is_our_turn}:{active_seat}"
+                    f":{sum(o.get('bet',0) for o in opponents):.0f}"
                 )
-
-                if street == "preflop":
+                if need_recompute or display_key != prev_display_key:
+                    prev_display_key = display_key
+                    eff_opp = min(num_opponents, 2) if street == "preflop" else num_opponents
                     print_display(
-                        hole_cards, community_cards, odds, None,
-                        effective_opp, pot, street,
-                        position=position_name,
-                        preflop=pf,
+                        hole_cards, community_cards,
+                        cached_odds,
+                        None if street == "preflop" else cached_rec,
+                        eff_opp, pot, street,
+                        position=cached_position,
+                        preflop=cached_pf if street == "preflop" else None,
                         stack=stack,
                         big_blind=big_blind,
                         session=session_stats,
-                    )
-                else:
-                    print_display(
-                        hole_cards, community_cards, odds, rec,
-                        effective_opp, pot, street,
-                        position=position_name,
-                        stack=stack,
-                        big_blind=big_blind,
-                        session=session_stats,
+                        opponents=opponents,
+                        opponent_stats=opp_stats,
+                        is_our_turn=is_our_turn,
+                        seat_state=seat_state,
+                        active_seat=active_seat,
                     )
 
-                # -- AUTO MODE: execute the decision --
                 if auto_mode and has_actions:
                     action_key = f"{game_id}:{street}:{','.join(hole_cards)}"
                     if action_key != prev_acted_key:
-                        decision = pf if street == "preflop" else rec
+                        decision = cached_pf if street == "preflop" else cached_rec
                         if decision:
                             execute_auto_action(
                                 scraper, decision, raw_actions, console,
                             )
                             prev_acted_key = action_key
 
-                # Refinement pass (postflop only, manual display update)
-                if street != "preflop" and cards_changed:
-                    odds_final, rec2 = _refine_postflop(
-                        hole_cards, community_cards, odds, num_opponents,
-                        street, raw_actions, pot, stack, big_blind,
-                    )
-                    print_display(
-                        hole_cards, community_cards, odds_final, rec2,
-                        num_opponents, pot, street,
-                        position=position_name,
-                        stack=stack,
-                        big_blind=big_blind,
-                        session=session_stats,
-                    )
-
-                if cards_changed:
-                    prev_hole = hole_cards[:]
-                    prev_community = community_cards[:]
-
             elif len(hole_cards) < 2:
                 if prev_hole:
                     prev_hole = []
                     prev_community = []
                     prev_acted_key = ""
+                    cached_odds = None
+                    cached_rec = None
+                    cached_pf = None
+
+                hand_still_live = (
+                    game_id and game_id == prev_game_id
+                    and any(o.get("active") or o.get("has_cards") for o in opponents)
+                )
+
+                if hand_still_live:
+                    community_cards = detected["community_cards"]
+                    street = get_street(community_cards)
+                    spec_key = (
+                        f"spec:{game_id}:{street}:{pot}:{active_seat}"
+                        f":{sum(o.get('bet',0) for o in opponents):.0f}"
+                    )
+                    if spec_key != prev_display_key:
+                        prev_display_key = spec_key
+                        print_display(
+                            [], community_cards,
+                            None, None,
+                            num_opponents, pot, street,
+                            position="FOLDED",
+                            stack=stack,
+                            big_blind=big_blind,
+                            session=session_stats,
+                            opponents=opponents,
+                            opponent_stats=opp_stats,
+                            is_our_turn=False,
+                            seat_state=None,
+                            active_seat=active_seat,
+                        )
                 else:
                     now = time.monotonic()
                     if now - last_hint > 8.0:
@@ -398,6 +460,7 @@ def run(auto_mode=False):
                 time.sleep(1)
 
     scraper.close()
+    opp_tracker.close()
 
     if session.hands_played > 0:
         path = session.save()

@@ -90,12 +90,12 @@ OPEN_RANGE = {
 
 # Maximum hand group for CALLING / 3-BETTING when facing a single raise.
 FACING_RAISE = {
-    "UTG": 2,
-    "MP":  2,
-    "CO":  3,
-    "BTN": 4,
+    "UTG": 3,
+    "MP":  3,
+    "CO":  4,
+    "BTN": 5,
     "SB":  3,
-    "BB":  5,  # BB defends wide due to pot odds
+    "BB":  5,
 }
 
 # Maximum hand group for continuing vs a 3-bet.
@@ -168,7 +168,7 @@ def get_position(dealer_seat_idx, our_seat_idx, occupied_seat_indices):
 
 
 def preflop_raise_size(position, big_blind, num_limpers=0):
-    """GTO-recommended open raise size by position."""
+    """GTO-recommended open raise size by position, +1BB per limper."""
     if big_blind <= 0:
         return 0.0
     multiplier = {"UTG": 3.0, "MP": 2.75, "CO": 2.5, "BTN": 2.5, "SB": 3.0, "BB": 3.0}
@@ -177,25 +177,18 @@ def preflop_raise_size(position, big_blind, num_limpers=0):
 
 
 def preflop_advice(hole_cards, position, facing_raise=False, call_amount=0.0,
-                   pot=0.0, big_blind=0.0, stack=0.0):
+                   pot=0.0, big_blind=0.0, stack=0.0, num_limpers=0):
     """
-    GTO-based preflop recommendation.
+    GTO-based preflop recommendation with limper awareness.
 
-    Returns dict with:
-        hand_notation:  str   'KJo', 'AQs', 'TT'
-        hand_group:     int   1-7
-        hand_tier:      str   'PREMIUM', 'STRONG', etc.
-        position:       str   'UTG', 'CO', 'BTN', etc.
-        action:         str   'RAISE', 'CALL', 'FOLD', '3-BET'
-        reason:         str   human-readable explanation
-        in_range:       bool  whether this hand is in your opening range
-        sizing:         str   sizing advice
+    Returns dict with hand_notation, hand_group, hand_tier, position,
+    action, reason, in_range, sizing, bet_amount, stack_bb, num_limpers.
     """
     notation, suited, is_pair, hi, lo = classify_hand(hole_cards)
     group = HAND_GROUP.get(notation, 7)
     tier = GROUP_LABEL.get(group, "TRASH")
 
-    raise_amt = preflop_raise_size(position, big_blind)
+    raise_amt = preflop_raise_size(position, big_blind, num_limpers)
     three_bet_amt = round(call_amount * 3, 2) if call_amount > 0 else round(raise_amt * 3, 2)
     stack_bb = stack / big_blind if big_blind > 0 else 0
 
@@ -210,6 +203,7 @@ def preflop_advice(hole_cards, position, facing_raise=False, call_amount=0.0,
         "sizing": "fold",
         "bet_amount": 0.0,
         "stack_bb": round(stack_bb, 1),
+        "num_limpers": num_limpers,
     }
 
     if facing_raise:
@@ -246,23 +240,43 @@ def preflop_advice(hole_cards, position, facing_raise=False, call_amount=0.0,
             result["sizing"] = "FOLD"
     else:
         max_group = OPEN_RANGE.get(position, 3)
+        if num_limpers >= 2:
+            max_group = max(max_group - 1, 1)
+
         if group <= max_group:
             result["in_range"] = True
             result["action"] = "RAISE"
             result["bet_amount"] = raise_amt
-            if group <= 1:
+            if num_limpers > 0:
+                result["reason"] = (
+                    f"{notation} is {tier} -- iso-raise over {num_limpers} limper(s) "
+                    f"from {position}"
+                )
+                result["sizing"] = f"ISO-RAISE to ${raise_amt:.2f} (+{num_limpers}BB)"
+            elif group <= 1:
                 result["reason"] = f"{notation} is {tier} -- always raise"
+                result["sizing"] = f"RAISE to ${raise_amt:.2f}"
             elif group <= 2:
                 result["reason"] = f"{notation} is {tier} -- raise from any position"
+                result["sizing"] = f"RAISE to ${raise_amt:.2f}"
             else:
                 result["reason"] = f"{notation} is {tier} -- in range from {position}"
-            result["sizing"] = f"RAISE to ${raise_amt:.2f}"
+                result["sizing"] = f"RAISE to ${raise_amt:.2f}"
         else:
             if position == "BB":
                 result["action"] = "CHECK"
                 result["reason"] = f"{notation} from BB -- check, not worth raising"
                 result["sizing"] = "CHECK"
                 result["in_range"] = True
+            elif num_limpers >= 2 and group <= max_group + 2:
+                result["action"] = "CALL"
+                result["in_range"] = True
+                result["bet_amount"] = big_blind
+                result["reason"] = (
+                    f"{notation} is {tier} -- {num_limpers} limpers give good pot odds, "
+                    f"call from {position}"
+                )
+                result["sizing"] = f"CALL ${big_blind:.2f}"
             else:
                 diff = group - max_group
                 if diff == 1:

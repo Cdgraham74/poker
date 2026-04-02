@@ -34,64 +34,99 @@ def decode_card(num_str):
 
 
 EXTRACT_JS = """(function(){
-if(!window._psc){window._psc={};}
+if(!window._psc)window._psc={};
 var C=window._psc;
-function fs(key){
-  var ce=C[key];
-  if(ce){if(!document.contains(ce)){delete C[key];delete C[key+'_fk'];}else{try{
-    var fk=C[key+'_fk'];
-    var cur=ce[fk];
-    for(var d=0;d<50&&cur;d++){
-      try{if(cur.stateNode&&cur.stateNode.state&&cur.stateNode.state[key]!==undefined)
-        return cur.stateNode.state[key];}catch(e){}
+
+var need=['gameManagerModel','gameModel','chipsModel','deskScreenModel','clientModel','tableActionsModel'];
+var F={};
+var nf=need.length;
+
+var ce=C._el;
+if(ce&&document.contains(ce)){
+  var fk=C._fk;
+  if(fk){try{var cur=ce[fk];
+    for(var d=0;d<60&&cur;d++){
+      try{if(cur.stateNode&&cur.stateNode.state){
+        var st=cur.stateNode.state;
+        for(var ni=0;ni<need.length;ni++){
+          var k=need[ni];
+          if(!F[k]&&st[k]!==undefined){F[k]=st[k];nf--;}
+        }
+        if(nf<=0)break;
+      }}catch(e){}
       cur=cur['return'];
     }
-  }catch(e){delete C[key];delete C[key+'_fk'];}}}
-  // Cache miss — full DOM scan
-  var els=document.querySelectorAll('*');
-  for(var i=0;i<els.length;i++){
+  }catch(e){}}
+  if(nf<=0){C._hit=(C._hit||0)+1;}
+  else{delete C._el;delete C._fk;}
+}
+
+if(nf>0){
+  var els=document.querySelectorAll('[class]');
+  for(var i=0;i<els.length&&nf>0;i++){
     var el=els[i],ks=Object.keys(el),fk=null;
     for(var j=0;j<ks.length;j++){if(ks[j].indexOf('__reactFiber')===0){fk=ks[j];break;}}
     if(!fk)continue;
     var cur=el[fk];
-    for(var d=0;d<50&&cur;d++){
-      try{if(cur.stateNode&&cur.stateNode.state&&cur.stateNode.state[key]!==undefined){
-        C[key]=el;C[key+'_fk']=fk;
-        return cur.stateNode.state[key];
+    for(var d=0;d<60&&cur;d++){
+      try{if(cur.stateNode&&cur.stateNode.state){
+        var st=cur.stateNode.state;
+        for(var ni=0;ni<need.length;ni++){
+          var k=need[ni];
+          if(!F[k]&&st[k]!==undefined){F[k]=st[k];nf--;
+            if(!C._el){C._el=el;C._fk=fk;}
+          }
+        }
+        if(nf<=0)break;
       }}catch(e){}
       cur=cur['return'];
     }
+    if(nf<=0)break;
   }
-  return null;
 }
+
 var r={};
-var gm=fs('gameManagerModel');
+var gm=F['gameManagerModel'];
 if(gm){
-  var g=gm.gameState||gm.prevGameState;
+  var gs=gm.gameState;var pg=gm.prevGameState;
+  var g=gs||pg;
   if(g){
     r.gameId=g.gameId||0;
     r.tableState=g.tableState;
     r.round=g.moves?g.moves.round:-1;
-    if(g.moves){r.dealerIdx=g.moves.dealerIndex;r.sbIdx=g.moves.smallBlindIndex;r.bbIdx=g.moves.bigBlindIndex;}
+    if(g.moves){r.dealerIdx=g.moves.dealerIndex;r.sbIdx=g.moves.smallBlindIndex;r.bbIdx=g.moves.bigBlindIndex;
+      r.activeIdx=g.moves.activeIndex;r.clientIdx=g.moves.clientIndex;r.movesRound=g.moves.round;
+    }
+    r.secondsFromGameStart=g.secondsFromGameStart||0;
     r.seats=[];
     if(g.seats)for(var si=0;si<g.seats.length;si++){
       var s=g.seats[si];
-      r.seats.push({idx:si,id:s.id,cards:s.cards||'',bet:s.bet,cash:s.cash,flags:s.flags,name:s.displayName});
+      r.seats.push({idx:si,id:s.id,cards:s.cards||'',bet:s.bet,cash:s.cash,flags:s.flags,flags2:s.flags2||0,name:s.displayName,wc:s.winChance||0,elapsed:s.elapsedTurnSeconds||0});
     }
     r.boardCards=(g.desk&&g.desk.cards)?g.desk.cards:'';
     r.deskPot=g.desk?(g.desk.pot||0):0;
     r.pots=g.pots||[];
     r.seatState=g.seatState||null;
-    var alt=gm.gameState?gm.prevGameState:null;
-    if(alt&&alt.gameId===r.gameId&&alt.seats){r._altSeats=[];for(var ai=0;ai<alt.seats.length;ai++){var st=alt.seats[ai];r._altSeats.push({idx:ai,id:st.id,cards:st.cards||''});}}
+    if(gs&&pg&&pg.gameId===r.gameId&&pg.seats){
+      r._altSeats=[];for(var ai=0;ai<pg.seats.length;ai++){var st=pg.seats[ai];r._altSeats.push({idx:ai,id:st.id,cards:st.cards||''});}
+    }
+    if(pg&&pg.gameId&&pg.gameId!==r.gameId){
+      r.prevGameId=pg.gameId;
+      r.prevSeats=[];
+      if(pg.seats)for(var pi=0;pi<pg.seats.length;pi++){
+        var ps=pg.seats[pi];
+        r.prevSeats.push({idx:pi,id:ps.id,bet:ps.bet,cash:ps.cash,flags:ps.flags,name:ps.displayName,cards:ps.cards||''});
+      }
+      r.prevPot=pg.desk?(pg.desk.pot||0):0;
+    }
   }
 }
-var gmod=fs('gameModel');
+var gmod=F['gameModel'];
 if(gmod&&gmod.tableInfo){r.bigBlind=gmod.tableInfo.bigBlind||0;r.smallBlind=gmod.tableInfo.smallBlind||0;}
-var cm=fs('chipsModel');r.pot=cm?(cm.pot||0):0;
-var dsm=fs('deskScreenModel');r.combination=dsm?(dsm.highCombination||''):'';
-var clm=fs('clientModel');r.playerId=clm?clm.playerId:0;
-var tam=fs('tableActionsModel');
+var cm=F['chipsModel'];r.pot=cm?(cm.pot||0):0;
+var dsm=F['deskScreenModel'];r.combination=dsm?(dsm.highCombination||''):'';
+var clm=F['clientModel'];r.playerId=clm?clm.playerId:0;
+var tam=F['tableActionsModel'];
 if(tam&&tam.actions){r.actions=tam.actions;}else{r.actions=[];}
 return JSON.stringify(r);
 })()"""
@@ -437,6 +472,12 @@ class StakePokerScraper:
             "position": None,
             "stack": 0.0,
             "big_blind": 0.0,
+            "opponents": [],
+            "num_limpers": 0,
+            "is_our_turn": False,
+            "active_seat": -1,
+            "seat_state": None,
+            "hand_time": 0,
         }
         if not data:
             return empty
@@ -477,7 +518,74 @@ class StakePokerScraper:
                     break
 
         bb_raw = data.get("bigBlind", 0) or 0
+        sb_idx = data.get("sbIdx")
+        bb_idx = data.get("bbIdx")
+
+        FLAG_IN_HAND = 4
+        opponents = []
+        num_limpers = 0
+        for seat in data.get("seats", []):
+            sid = seat.get("id")
+            if not sid or sid == 0 or sid == pid:
+                continue
+            seat_idx = seat.get("idx", 0)
+            flags = seat.get("flags", 0)
+            raw_opp_cards = seat.get("cards") or ""
+            has_cards = raw_opp_cards != "" and raw_opp_cards != "0"
+            active = bool(flags & FLAG_IN_HAND) or has_cards
+            seat_bet = float(seat.get("bet", 0) or 0) / scale
+            opponents.append({
+                "name": seat.get("name", "") or "",
+                "stack": float(seat.get("cash", 0) or 0) / scale,
+                "bet": seat_bet,
+                "active": active,
+                "has_cards": has_cards,
+                "seat_idx": seat_idx,
+                "win_chance": seat.get("wc", 0) or 0,
+                "think_time": seat.get("elapsed", 0) or 0,
+            })
+            if bb_raw > 0 and seat_idx != bb_idx and seat_idx != sb_idx:
+                if seat.get("bet", 0) == bb_raw and has_cards:
+                    num_limpers += 1
+
+        out["opponents"] = opponents
+        out["num_limpers"] = num_limpers
         out["big_blind"] = float(bb_raw) / scale
+
+        client_idx = data.get("clientIdx")
+        active_idx = data.get("activeIdx")
+        out["is_our_turn"] = (client_idx is not None and active_idx is not None
+                              and client_idx == active_idx)
+        out["active_seat"] = active_idx if active_idx is not None else -1
+
+        seat_state = data.get("seatState")
+        if seat_state and isinstance(seat_state, dict):
+            out["seat_state"] = {
+                "is_losing": seat_state.get("isLosing", False),
+                "combination": seat_state.get("highCombination", ""),
+            }
+
+        out["hand_time"] = data.get("secondsFromGameStart", 0) or 0
+
+        prev_gid = data.get("prevGameId")
+        if prev_gid and data.get("prevSeats"):
+            prev_seats = []
+            for ps in data["prevSeats"]:
+                psid = ps.get("id")
+                if psid and psid != 0:
+                    prev_seats.append({
+                        "id": psid,
+                        "name": ps.get("name", ""),
+                        "bet": float(ps.get("bet", 0) or 0) / scale,
+                        "stack": float(ps.get("cash", 0) or 0) / scale,
+                        "flags": ps.get("flags", 0),
+                        "had_cards": ps.get("cards") not in ("", None),
+                    })
+            out["prev_hand"] = {
+                "game_id": prev_gid,
+                "seats": prev_seats,
+                "pot": float(data.get("prevPot", 0) or 0) / scale,
+            }
 
         dealer_idx = data.get("dealerIdx")
         if dealer_idx is not None and our_seat_idx is not None and occupied_seats:
@@ -494,26 +602,9 @@ class StakePokerScraper:
             decoded = [decode_card(p) for p in board_str.split(";") if p]
             out["community_cards"] = [c for c in decoded if c]
 
-        FLAG_IN_HAND = 4  # bit 2 indicates player is active (hasn't folded)
-        seats = data.get("seats", [])
-
-        active_by_flags = sum(
-            1
-            for s in seats
-            if s.get("id") != pid
-            and s.get("cards") not in ("", None)
-            and (s.get("flags", 0) & FLAG_IN_HAND)
-        )
-
-        if active_by_flags > 0:
-            out["num_opponents"] = active_by_flags
-        else:
-            all_with_cards = sum(
-                1
-                for s in seats
-                if s.get("id") != pid and s.get("cards") not in ("", None)
-            )
-            out["num_opponents"] = max(all_with_cards, 1)
+        active_opp = sum(1 for o in opponents if o["active"])
+        opp_with_cards = sum(1 for o in opponents if o["has_cards"])
+        out["num_opponents"] = active_opp if active_opp > 0 else max(opp_with_cards, 1)
 
         raw_actions = data.get("actions", [])
         scaled_actions = []
