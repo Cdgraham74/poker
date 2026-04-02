@@ -276,18 +276,14 @@ def parse_actions(raw_actions):
     }
 
 
-def get_bet_recommendation(equity, street='preflop', pot=0.0, actions=None):
+def get_bet_recommendation(equity, street='preflop', pot=0.0, actions=None,
+                            stack=0.0, big_blind=0.0,
+                            hole_cards=None, community_cards=None):
     """
-    Context-aware bet recommendation using equity, pot odds, and available actions.
+    Context-aware bet recommendation using equity, pot odds, SPR, board texture,
+    implied odds, and available actions.
 
-    Args:
-        equity: float 0.0-1.0
-        street: 'preflop', 'flop', 'turn', 'river'
-        pot: current pot size
-        actions: raw actions list from tableActionsModel (optional)
-
-    Returns:
-        dict with 'action', 'confidence', 'sizing' keys
+    Returns dict with 'action', 'confidence', 'sizing', 'bet_amount', 'notes' keys.
     """
     pct = equity * 100
     act = parse_actions(actions)
@@ -295,65 +291,104 @@ def get_bet_recommendation(equity, street='preflop', pot=0.0, actions=None):
     call_amt = act["call_amount"]
     facing_bet = act["can_call"] and call_amt > 0
 
-    # Pot odds: what equity do we need to justify calling?
     pot_odds = 0.0
     if facing_bet and pot > 0:
         pot_odds = call_amt / (pot + call_amt)
 
-    # --- FACING A BET (must call, raise, or fold) ---
-    if facing_bet:
-        if pct >= 80:
-            return {'action': 'RAISE / ALL-IN', 'confidence': 'monster', 'sizing': 'all-in'}
-        elif pct >= 65:
-            return {'action': 'RAISE', 'confidence': 'very strong', 'sizing': '75%'}
-        elif equity > pot_odds * 1.5:
-            return {'action': 'RAISE', 'confidence': 'strong', 'sizing': '50%'}
-        elif equity > pot_odds:
-            return {'action': 'CALL', 'confidence': 'good', 'sizing': 'check'}
-        elif equity > pot_odds * 0.7:
-            return {'action': 'CALL (borderline)', 'confidence': 'marginal', 'sizing': 'check'}
-        else:
-            return {'action': 'FOLD', 'confidence': 'weak', 'sizing': 'fold'}
+    spr = calc_spr(stack, pot) if stack > 0 and pot > 0 else 20.0
+    bet_sizes = compute_bet_sizes(pot, stack, big_blind)
+    notes = []
 
-    # --- NOT FACING A BET (can check or bet) ---
+    # Board and draw analysis for post-flop
+    draw_info = {"outs": 0, "draws": [], "implied_mult": 1.0}
+    board_info = {"texture": "N/A", "notes": []}
+    if street != "preflop" and hole_cards and community_cards:
+        board_info = analyze_board(community_cards)
+        draw_info = count_draw_outs(hole_cards, community_cards)
+        if draw_info["draws"]:
+            notes.extend(draw_info["draws"])
+        notes.extend(board_info.get("notes", []))
+
+    effective_equity = equity * draw_info["implied_mult"]
+    eff_pct = effective_equity * 100
+
+    def _result(action, confidence, sizing_key, extra_notes=None):
+        amt = bet_sizes.get(sizing_key, 0.0)
+        r = {
+            "action": action,
+            "confidence": confidence,
+            "sizing": sizing_key,
+            "bet_amount": amt,
+            "notes": notes + (extra_notes or []),
+            "spr": round(spr, 1),
+            "board_texture": board_info.get("texture", "N/A"),
+            "draw_outs": draw_info["outs"],
+        }
+        return r
+
+    # --- FACING A BET ---
+    if facing_bet:
+        if eff_pct >= 80:
+            return _result("RAISE / ALL-IN", "monster", "all_in")
+        if eff_pct >= 65:
+            return _result("RAISE", "very strong", "75_pot")
+        if effective_equity > pot_odds * 1.5:
+            return _result("RAISE", "strong", "50_pot")
+        if effective_equity > pot_odds:
+            if spr < 4:
+                return _result("CALL (low SPR - consider jam)", "good", "all_in",
+                               ["Low SPR: calling commits you"])
+            return _result("CALL", "good", "min_bet",
+                           [f"Pot odds {pot_odds:.0%}, you have {eff_pct:.0f}%"])
+        if effective_equity > pot_odds * 0.7:
+            if draw_info["outs"] >= 8:
+                return _result("CALL (drawing)", "marginal", "min_bet",
+                               [f"{draw_info['outs']} outs with implied odds"])
+            return _result("CALL (borderline)", "marginal", "min_bet")
+        return _result("FOLD", "weak", "min_bet")
+
+    # --- NOT FACING A BET ---
     if can_check:
-        if pct >= 80:
-            return {'action': 'BET ALL-IN', 'confidence': 'monster', 'sizing': 'all-in'}
-        elif pct >= 70:
-            return {'action': 'BET 75% POT', 'confidence': 'very strong', 'sizing': '75%'}
-        elif pct >= 60:
-            return {'action': 'BET 50% POT', 'confidence': 'strong', 'sizing': '50%'}
-        elif pct >= 50:
-            return {'action': 'BET 25% POT', 'confidence': 'good', 'sizing': '25%'}
-        else:
-            return {'action': 'CHECK', 'confidence': 'marginal', 'sizing': 'check'}
+        if spr < 3 and eff_pct >= 50:
+            return _result("BET / JAM", "strong", "all_in",
+                           ["Low SPR: shove for max value"])
+        if eff_pct >= 80:
+            return _result("BET", "monster", "75_pot")
+        if eff_pct >= 70:
+            return _result("BET", "very strong", "67_pot")
+        if eff_pct >= 60:
+            return _result("BET", "strong", "50_pot")
+        if eff_pct >= 50:
+            return _result("BET", "good", "33_pot")
+        if draw_info["outs"] >= 9 and board_info.get("texture") == "WET":
+            return _result("BET (semi-bluff)", "good", "50_pot",
+                           ["Semi-bluff with strong draw"])
+        return _result("CHECK", "marginal", "min_bet")
 
     # --- PREFLOP / NO ACTION DATA ---
-    if street == 'preflop':
+    if street == "preflop":
         if pct >= 75:
-            return {'action': 'RAISE / ALL-IN', 'confidence': 'very strong', 'sizing': 'all-in'}
-        elif pct >= 60:
-            return {'action': 'RAISE 75% POT', 'confidence': 'strong', 'sizing': '75%'}
-        elif pct >= 50:
-            return {'action': 'RAISE 50% POT', 'confidence': 'good', 'sizing': '50%'}
-        elif pct >= 35:
-            return {'action': 'CALL / CHECK', 'confidence': 'marginal', 'sizing': 'check'}
-        else:
-            return {'action': 'FOLD', 'confidence': 'weak', 'sizing': 'fold'}
+            return _result("RAISE / ALL-IN", "very strong", "all_in")
+        if pct >= 60:
+            return _result("RAISE", "strong", "75_pot")
+        if pct >= 50:
+            return _result("RAISE", "good", "50_pot")
+        if pct >= 35:
+            return _result("CALL / CHECK", "marginal", "min_bet")
+        return _result("FOLD", "weak", "min_bet")
 
-    # Post-flop fallback (no action data)
-    if pct >= 80:
-        return {'action': 'ALL-IN', 'confidence': 'monster', 'sizing': 'all-in'}
-    elif pct >= 70:
-        return {'action': 'BET 75% POT', 'confidence': 'very strong', 'sizing': '75%'}
-    elif pct >= 60:
-        return {'action': 'BET 50% POT', 'confidence': 'strong', 'sizing': '50%'}
-    elif pct >= 50:
-        return {'action': 'BET 25% POT', 'confidence': 'good', 'sizing': '25%'}
-    elif pct >= 35:
-        return {'action': 'CHECK / CALL', 'confidence': 'marginal', 'sizing': 'check'}
-    else:
-        return {'action': 'CHECK / FOLD', 'confidence': 'weak', 'sizing': 'check'}
+    # Post-flop fallback
+    if eff_pct >= 80:
+        return _result("ALL-IN", "monster", "all_in")
+    if eff_pct >= 70:
+        return _result("BET", "very strong", "75_pot")
+    if eff_pct >= 60:
+        return _result("BET", "strong", "50_pot")
+    if eff_pct >= 50:
+        return _result("BET", "good", "33_pot")
+    if eff_pct >= 35:
+        return _result("CHECK / CALL", "marginal", "min_bet")
+    return _result("CHECK / FOLD", "weak", "min_bet")
 
 
 def validate_card(card_str):
@@ -361,6 +396,188 @@ def validate_card(card_str):
     if not card_str or len(card_str) != 2:
         return False
     return card_str[0] in RANKS and card_str[1] in SUITS
+
+
+def calc_spr(stack, pot):
+    """Stack-to-Pot Ratio. Drives post-flop commitment decisions."""
+    if pot <= 0:
+        return 999.0
+    return stack / pot
+
+
+def spr_advice(spr):
+    """Strategic guidance based on SPR."""
+    if spr < 4:
+        return "LOW", "Commit with top pair+. Push/fold territory."
+    if spr < 8:
+        return "MEDIUM", "Two pair+ to commit. Top pair is a bluff-catcher."
+    if spr < 13:
+        return "HIGH", "Need strong hands to stack off. Sets/straights/flushes."
+    return "DEEP", "Speculative hands gain value. Play for implied odds."
+
+
+def analyze_board(community_cards):
+    """
+    Analyze board texture for strategic context.
+
+    Returns dict with:
+        texture:      'DRY' / 'SEMI-WET' / 'WET'
+        flush_draw:   bool  (3 of same suit on board)
+        flush_made:   bool  (4+ of same suit on board)
+        paired:       bool  (board has a pair)
+        trips_board:  bool  (board has three of a kind)
+        straight_draw: bool (3+ connected cards)
+        high_board:   bool  (2+ cards T or higher)
+        notes:        list of str
+    """
+    if len(community_cards) < 3:
+        return {"texture": "N/A", "notes": []}
+
+    ranks = [card_rank(c) for c in community_cards]
+    suits = [card_suit(c) for c in community_cards]
+
+    suit_counts = Counter(suits)
+    rank_counts = Counter(ranks)
+    max_suit = max(suit_counts.values())
+    max_rank = max(rank_counts.values())
+
+    flush_draw = max_suit == 3
+    flush_made = max_suit >= 4
+    paired = max_rank >= 2
+    trips_board = max_rank >= 3
+
+    sorted_ranks = sorted(set(ranks))
+    connected = 0
+    for i in range(len(sorted_ranks) - 1):
+        if sorted_ranks[i + 1] - sorted_ranks[i] <= 2:
+            connected += 1
+    straight_draw = connected >= 2
+
+    high_board = sum(1 for r in ranks if r >= 8) >= 2  # T or higher
+
+    wetness = 0
+    notes = []
+    if flush_made:
+        wetness += 3
+        notes.append("FLUSH on board")
+    elif flush_draw:
+        wetness += 2
+        notes.append("Flush draw possible")
+    if straight_draw:
+        wetness += 2
+        notes.append("Straight draw possible")
+    if paired:
+        wetness += 1
+        notes.append("Paired board")
+    if trips_board:
+        notes.append("Trips on board")
+    if not high_board:
+        notes.append("Low board")
+
+    if wetness >= 3:
+        texture = "WET"
+    elif wetness >= 1:
+        texture = "SEMI-WET"
+    else:
+        texture = "DRY"
+
+    return {
+        "texture": texture,
+        "flush_draw": flush_draw,
+        "flush_made": flush_made,
+        "paired": paired,
+        "trips_board": trips_board,
+        "straight_draw": straight_draw,
+        "high_board": high_board,
+        "notes": notes,
+    }
+
+
+def count_draw_outs(hole_cards, community_cards):
+    """
+    Count drawing outs for flush and straight draws.
+    Returns dict with outs count, draw types, and implied odds multiplier.
+    """
+    if len(community_cards) < 3 or len(hole_cards) < 2:
+        return {"outs": 0, "draws": [], "implied_mult": 1.0}
+
+    all_cards = hole_cards + community_cards
+    ranks = [card_rank(c) for c in all_cards]
+    suits = [card_suit(c) for c in all_cards]
+    board_suits = [card_suit(c) for c in community_cards]
+
+    draws = []
+    outs = 0
+
+    # Flush draw: 4 of same suit among all cards, and at least 2 from board
+    suit_counts = Counter(suits)
+    board_suit_counts = Counter(board_suits)
+    for s, cnt in suit_counts.items():
+        if cnt == 4 and board_suit_counts.get(s, 0) >= 2:
+            outs += 9
+            draws.append("FLUSH DRAW (9 outs)")
+            break
+
+    # Open-ended straight draw: 4 consecutive ranks
+    unique_ranks = sorted(set(ranks))
+    has_oesd = False
+    has_gutshot = False
+    for i in range(len(unique_ranks)):
+        consec = [unique_ranks[i]]
+        for j in range(i + 1, len(unique_ranks)):
+            if unique_ranks[j] - consec[-1] <= 2:
+                consec.append(unique_ranks[j])
+            else:
+                break
+        span = consec[-1] - consec[0]
+        if len(consec) >= 4 and span == 3:
+            has_oesd = True
+        elif len(consec) >= 4 and span == 4:
+            has_gutshot = True
+
+    if has_oesd:
+        outs += 8
+        draws.append("OPEN-ENDED STRAIGHT (8 outs)")
+    elif has_gutshot:
+        outs += 4
+        draws.append("GUTSHOT STRAIGHT (4 outs)")
+
+    # Overcards (2 cards above the highest board card)
+    if len(community_cards) >= 3:
+        max_board = max(card_rank(c) for c in community_cards)
+        overcards = sum(1 for c in hole_cards if card_rank(c) > max_board)
+        if overcards == 2 and outs == 0:
+            outs += 6
+            draws.append(f"2 OVERCARDS (6 outs)")
+        elif overcards == 1 and outs > 0:
+            outs += 3
+            draws.append(f"1 OVERCARD (+3 outs)")
+
+    # Implied odds multiplier: more outs = more implied odds value
+    if outs >= 12:
+        implied_mult = 1.6
+    elif outs >= 9:
+        implied_mult = 1.4
+    elif outs >= 6:
+        implied_mult = 1.2
+    else:
+        implied_mult = 1.0
+
+    return {"outs": outs, "draws": draws, "implied_mult": implied_mult}
+
+
+def compute_bet_sizes(pot, stack, big_blind):
+    """Compute exact dollar bet sizes for the current situation."""
+    sizes = {}
+    sizes["min_bet"] = big_blind if big_blind > 0 else 0.0
+    sizes["25_pot"] = round(pot * 0.25, 2)
+    sizes["33_pot"] = round(pot * 0.33, 2)
+    sizes["50_pot"] = round(pot * 0.50, 2)
+    sizes["67_pot"] = round(pot * 0.67, 2)
+    sizes["75_pot"] = round(pot * 0.75, 2)
+    sizes["pot"] = round(pot, 2)
+    sizes["all_in"] = round(stack, 2)
+    return sizes
 
 
 # Quick self-test
